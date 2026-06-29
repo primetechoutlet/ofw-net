@@ -18,13 +18,16 @@ const dbPath = path.join(dataDir, 'pisonet.db');
 let db = null;
 
 // ============================================================
-// INITIALIZE DATABASE
+// INITIALIZE DATABASE - FIXED VERSION
 // ============================================================
 
 async function initDatabase() {
     try {
+        // ✅ FIX: Use local wasm file from node_modules
         const SQL = await initSqlJs({
-            locateFile: file => `https://sql.js.org/dist/${file}`
+            locateFile: () => {
+                return path.join(__dirname, 'node_modules', 'sql.js', 'dist', 'sql-wasm.wasm');
+            }
         });
 
         // Try to load existing database, or create new one
