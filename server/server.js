@@ -1,5 +1,5 @@
 // ============================================================
-// OFW-NET SERVER v2.2 - RENDER OPTIMIZED
+// OFW-NET SERVER v3.0 - Fixed for sql.js
 // ============================================================
 
 const WebSocket = require('ws');
@@ -12,7 +12,7 @@ const http = require('http');
 dotenv.config();
 
 // Import database module
-const db = require('./database');
+const database = require('./database');
 
 // Configuration
 const PORT = process.env.PORT || 3000;
@@ -60,7 +60,7 @@ const server = http.createServer((req, res) => {
 // Create WebSocket server attached to HTTP server
 const wss = new WebSocket.Server({ 
     server,
-    path: '/',  // Explicit path for Render
+    path: '/',
     clientTracking: true,
     perMessageDeflate: true
 });
@@ -71,8 +71,10 @@ const staff = [];
 const monitors = [];
 const activeTimers = {};
 
-console.log('🚀 OFW-NET Server v2.2 starting...');
-console.log(`📡 Server running on port ${PORT}`);
+// Database reference (will be set after initialization)
+let db = null;
+
+console.log('🚀 OFW-NET Server v3.0 starting...');
 console.log(`🔐 Staff password: ${STAFF_PASSWORD === 'change_this_password' ? '⚠️ USING DEFAULT - CHANGE IT!' : '✅ Set'}`);
 console.log(`🔐 Monitor password: ${MONITOR_PASSWORD === 'change_this_password' ? '⚠️ USING DEFAULT - CHANGE IT!' : '✅ Set'}`);
 
@@ -147,9 +149,12 @@ function startServerTimer(pcId, minutes) {
                     } catch (e) {}
                 }
 
-                db.updateSessionEnd(pcId, 'expired');
-                db.updatePCStatus(pcId, 'locked', 0, 0, 0);
-                db.logAction(pcId, 'session_expired', 'Time ran out');
+                // Update database
+                if (db) {
+                    database.updateSessionEnd(pcId, 'expired');
+                    database.updatePCStatus(pcId, 'locked', 0, 0, 0);
+                    database.logAction(pcId, 'session_expired', 'Time ran out');
+                }
 
                 broadcastToStaffAndMonitors({
                     type: 'session_expired',
@@ -213,8 +218,10 @@ wss.on('connection', (ws, req) => {
                     lastSeen: Date.now()
                 };
 
-                await db.updatePCStatus(pcId, data.status || 'idle', data.timeRemaining || 0);
-                await db.logAction(pcId, 'pc_connected', `Connected from ${clientIP}`);
+                if (db) {
+                    await database.updatePCStatus(pcId, data.status || 'idle', data.timeRemaining || 0);
+                    await database.logAction(pcId, 'pc_connected', `Connected from ${clientIP}`);
+                }
 
                 console.log(`✅ PC ${pcId} registered`);
 
@@ -257,7 +264,9 @@ wss.on('connection', (ws, req) => {
                         } catch (e) {}
                     });
 
-                    await db.logAction('STAFF', 'staff_login', 'Staff panel connected');
+                    if (db) {
+                        await database.logAction('STAFF', 'staff_login', 'Staff panel connected');
+                    }
                 } else {
                     ws.send(JSON.stringify({ 
                         type: 'error', 
@@ -289,7 +298,9 @@ wss.on('connection', (ws, req) => {
                         } catch (e) {}
                     });
 
-                    await db.logAction('MONITOR', 'monitor_login', 'Monitor connected');
+                    if (db) {
+                        await database.logAction('MONITOR', 'monitor_login', 'Monitor connected');
+                    }
                 } else {
                     ws.send(JSON.stringify({ 
                         type: 'error', 
@@ -312,7 +323,13 @@ wss.on('connection', (ws, req) => {
                 const pc = pcs[data.pcId];
                 
                 try {
-                    const payment = await db.savePayment(data.pcId, data.amount, data.minutes);
+                    let payment = null;
+                    if (db) {
+                        payment = await database.savePayment(data.pcId, data.amount, data.minutes);
+                    } else {
+                        // Fallback if database not ready
+                        payment = { reference: `PAY-${Date.now()}-${data.pcId}` };
+                    }
                     
                     pc.pendingPayment = {
                         minutes: data.minutes,
@@ -321,7 +338,9 @@ wss.on('connection', (ws, req) => {
                     };
                     pc.status = 'pending';
 
-                    await db.logAction(data.pcId, 'payment_requested', `₱${data.amount} for ${data.minutes}min`);
+                    if (db) {
+                        await database.logAction(data.pcId, 'payment_requested', `₱${data.amount} for ${data.minutes}min`);
+                    }
 
                     // Broadcast to staff and monitors
                     broadcastToStaffAndMonitors({
@@ -351,7 +370,7 @@ wss.on('connection', (ws, req) => {
             }
 
             // ============================================================
-            // CONFIRM PAYMENT - FIXED
+            // CONFIRM PAYMENT
             // ============================================================
             if (data.type === 'confirm_payment' && isStaff) {
                 console.log(`🔑 Staff confirming payment for ${data.pcId}`);
@@ -399,9 +418,11 @@ wss.on('connection', (ws, req) => {
 
                 try {
                     // Save to database
-                    const session = await db.saveSession(data.pcId, pc.session.minutes, pc.session.amount, 'staff');
-                    await db.logAction(data.pcId, 'session_started', `₱${amount} for ${minutes}min`);
-                    await db.updatePCStatus(data.pcId, 'running', pc.timeRemaining, pc.session.minutes, pc.session.amount);
+                    if (db) {
+                        await database.saveSession(data.pcId, pc.session.minutes, pc.session.amount, 'staff');
+                        await database.logAction(data.pcId, 'session_started', `₱${amount} for ${minutes}min`);
+                        await database.updatePCStatus(data.pcId, 'running', pc.timeRemaining, pc.session.minutes, pc.session.amount);
+                    }
 
                     // CRITICAL: Send start_session to client with the time
                     if (pc.ws && pc.ws.readyState === WebSocket.OPEN) {
@@ -471,6 +492,27 @@ wss.on('connection', (ws, req) => {
                 }
             }
 
+// ============================================================
+// TIMER UPDATE FROM CLIENT
+// ============================================================
+if (data.type === 'timer_update') {
+    if (pcs[data.pcId]) {
+        const pc = pcs[data.pcId];
+        // Update time remaining
+        pc.timeRemaining = data.timeRemaining || 0;
+        console.log(`⏱️ Timer update from ${data.pcId}: ${pc.timeRemaining}s`);
+        
+        // Broadcast to staff and monitors
+        broadcastToStaffAndMonitors({
+            type: 'pc_status',
+            pcId: data.pcId,
+            status: pc.status || 'running',
+            timeRemaining: pc.timeRemaining,
+            session: pc.session || { minutes: 0, amount: 0 }
+        });
+    }
+}
+
             // ============================================================
             // DECLINE PAYMENT
             // ============================================================
@@ -485,7 +527,9 @@ wss.on('connection', (ws, req) => {
                 pc.status = 'idle';
 
                 try {
-                    await db.logAction(data.pcId, 'payment_declined', 'Declined by staff');
+                    if (db) {
+                        await database.logAction(data.pcId, 'payment_declined', 'Declined by staff');
+                    }
 
                     if (pc.ws && pc.ws.readyState === WebSocket.OPEN) {
                         pc.ws.send(JSON.stringify({
@@ -525,13 +569,15 @@ wss.on('connection', (ws, req) => {
                     pc.session = data.session;
                 }
 
-                await db.updatePCStatus(
-                    data.pcId, 
-                    pc.status, 
-                    pc.timeRemaining,
-                    pc.session.minutes || 0,
-                    pc.session.amount || 0
-                );
+                if (db) {
+                    await database.updatePCStatus(
+                        data.pcId, 
+                        pc.status, 
+                        pc.timeRemaining,
+                        pc.session.minutes || 0,
+                        pc.session.amount || 0
+                    );
+                }
 
                 broadcastToStaffAndMonitors({
                     type: 'pc_status',
@@ -557,8 +603,10 @@ wss.on('connection', (ws, req) => {
                 pc.pendingPayment = null;
 
                 try {
-                    await db.logAction(data.pcId, 'unlocked', 'Unlocked by staff');
-                    await db.updatePCStatus(data.pcId, 'idle', 0, 0, 0);
+                    if (db) {
+                        await database.logAction(data.pcId, 'unlocked', 'Unlocked by staff');
+                        await database.updatePCStatus(data.pcId, 'idle', 0, 0, 0);
+                    }
 
                     if (pc.ws && pc.ws.readyState === WebSocket.OPEN) {
                         pc.ws.send(JSON.stringify({
@@ -601,9 +649,11 @@ wss.on('connection', (ws, req) => {
                 }
 
                 try {
-                    await db.updateSessionEnd(data.pcId, 'stopped_by_staff');
-                    await db.logAction(data.pcId, 'session_stopped', 'Stopped by staff');
-                    await db.updatePCStatus(data.pcId, 'idle', 0, 0, 0);
+                    if (db) {
+                        await database.updateSessionEnd(data.pcId, 'stopped_by_staff');
+                        await database.logAction(data.pcId, 'session_stopped', 'Stopped by staff');
+                        await database.updatePCStatus(data.pcId, 'idle', 0, 0, 0);
+                    }
 
                     if (pc.ws && pc.ws.readyState === WebSocket.OPEN) {
                         pc.ws.send(JSON.stringify({
@@ -641,8 +691,10 @@ wss.on('connection', (ws, req) => {
                 pc.isRunning = false;
 
                 try {
-                    await db.logAction(data.pcId, 'locked', 'Locked by staff');
-                    await db.updatePCStatus(data.pcId, 'locked', 0, 0, 0);
+                    if (db) {
+                        await database.logAction(data.pcId, 'locked', 'Locked by staff');
+                        await database.updatePCStatus(data.pcId, 'locked', 0, 0, 0);
+                    }
 
                     if (pc.ws && pc.ws.readyState === WebSocket.OPEN) {
                         pc.ws.send(JSON.stringify({
@@ -680,7 +732,9 @@ wss.on('connection', (ws, req) => {
                 console.log('⏻ Shutting down all PCs...');
 
                 try {
-                    await db.logAction('SYSTEM', 'shutdown_all', 'Shutdown all command executed');
+                    if (db) {
+                        await database.logAction('SYSTEM', 'shutdown_all', 'Shutdown all command executed');
+                    }
 
                     Object.keys(pcs).forEach(id => {
                         const pc = pcs[id];
@@ -758,8 +812,10 @@ wss.on('connection', (ws, req) => {
                 status: 'offline'
             });
 
-            db.updatePCStatus(pcId, 'offline', 0, 0, 0);
-            db.logAction(pcId, 'pc_disconnected', 'Connection lost');
+            if (db) {
+                database.updatePCStatus(pcId, 'offline', 0, 0, 0);
+                database.logAction(pcId, 'pc_disconnected', 'Connection lost');
+            }
         }
 
         const staffIndex = staff.indexOf(ws);
@@ -799,27 +855,55 @@ function broadcastToStaffAndMonitors(data) {
 }
 
 // ============================================================
-// START SERVER
+// START SERVER - FIXED ORDER
 // ============================================================
 
-server.listen(PORT, () => {
-    console.log(`🚀 Server running on ws://localhost:${PORT}`);
-    console.log(`📊 Health check: http://localhost:${PORT}/health`);
-    console.log(`📊 Status page: http://localhost:${PORT}/`);
-});
+// First, initialize the database, then start the server
+database.initialize()
+    .then((dbInstance) => {
+        db = dbInstance;
+        console.log('✅ Database initialized successfully');
+        
+        // Now start the server
+        server.listen(PORT, () => {
+            console.log(`🚀 Server running on ws://localhost:${PORT}`);
+            console.log(`📊 Health check: http://localhost:${PORT}/health`);
+            console.log(`📊 Status page: http://localhost:${PORT}/`);
+            console.log(`📊 Stats: ${Object.keys(pcs).length} PCs connected`);
+        });
+    })
+    .catch((err) => {
+        console.error('❌ Failed to initialize database:', err);
+        process.exit(1);
+    });
 
 // ============================================================
-// GRACEFUL SHUTDOWN
+// GRACEFUL SHUTDOWN - FIXED
 // ============================================================
 process.on('SIGTERM', () => {
     console.log('🛑 Received SIGTERM, shutting down gracefully...');
+    
+    // Clear all timers
     Object.keys(activeTimers).forEach(key => {
         clearInterval(activeTimers[key]);
     });
+    
+    // Close server first
     server.close(() => {
-        db.db.close(() => {
-            console.log('✅ Database closed');
-            process.exit(0);
-        });
+        console.log('✅ Server closed');
+        
+        // Close database (using sql.js method)
+        if (db) {
+            try {
+                // sql.js database doesn't have a .close() method,
+                // but we can save the database to disk
+                const databaseModule = require('./database');
+                // The save is handled automatically in each operation
+                console.log('✅ Database saved');
+            } catch (e) {
+                console.log('Database already saved');
+            }
+        }
+        process.exit(0);
     });
 });

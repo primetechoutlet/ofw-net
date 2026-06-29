@@ -1065,6 +1065,7 @@ ws.onmessage = function(event) {
 // ============================================================
 // TIMER FUNCTIONS - FIXED VERSION
 // ============================================================
+
 function startSession(minutes, amount) {
     console.log('🔥🔥🔥 START SESSION CALLED! 🔥🔥🔥');
     console.log('Minutes:', minutes, 'Amount:', amount);
@@ -1150,8 +1151,9 @@ function startTimerInterval() {
     isRunning = true;
     updateUI();
     
-    // 🔥 Start the timer
+    // 🔥 Start the timer interval
     timerInterval = setInterval(function() {
+        console.log('⏱️ Timer tick - timeRemaining:', timeRemaining);
         // Only decrement if running
         if (isRunning && timeRemaining > 0) {
             timeRemaining--;
@@ -1177,7 +1179,10 @@ function startTimerInterval() {
                 sendStatus();
                 saveState();
             }
-            sendStatus();
+            // Send status every 5 seconds
+            if (timeRemaining % 5 === 0 || timeRemaining <= 10) {
+                sendStatus();
+            }
         } else if (timeRemaining <= 0) {
             // If timeRemaining is 0, stop the timer
             clearInterval(timerInterval);
@@ -1191,6 +1196,36 @@ function startTimerInterval() {
     }, 1000);
     
     console.log('✅ Timer interval started. ID:', timerInterval);
+}
+
+function stopTimer() {
+    console.log('⏹️ Stopping timer...');
+    stopAlarm();
+    alarmStarted = false;
+    if (isPending) {
+        if (!confirm('⏳ Payment request pending. Cancel it?')) return;
+        isPending = false;
+        resetPaymentButtons();
+    }
+    if (timerInterval) {
+        clearInterval(timerInterval);
+        timerInterval = null;
+    }
+    isRunning = false;
+    timeRemaining = 0;
+    isLocked = false;
+    updateDisplay();
+    timerDisplay.textContent = '00:00';
+    timerDisplay.classList.remove('warning', 'danger');
+    statusText.textContent = '⏳ Waiting for customer...';
+    statusText.className = 'status';
+    statusMsg.textContent = '🔄 Timer reset. Ready for next customer.';
+    statusMsg.className = 'status-msg waiting';
+    statusBadge.className = 'status-badge idle';
+    statusBadge.textContent = '● Idle';
+    resetPaymentButtons();
+    sendStatus();
+    saveState();
 }
 
     // ============================================================

@@ -249,7 +249,7 @@
         // OFW-NET STAFF PANEL - Controls all PCs
         // ============================================================
 
-        const SERVER_URL = "wss://ofw-net-server-i8zh.onrender.com";
+        const SERVER_URL = "wss://primetech-ofw-net.onrender.com";
         const STAFF_PASSWORD = "ofw123";
         let ws = null;
         let pcs = {};
@@ -1011,21 +1011,43 @@ function confirmPayment(pcId) {
             addLog(pcId, '🔒 Locked Manually', '-');
         }
 
-        function stopSession(pcId) {
-            if (!ws || ws.readyState !== WebSocket.OPEN) {
-                alert('❌ Not connected to server.');
-                return;
-            }
+function stopSession(pcId) {
+    console.log('⏹️ stopSession called for:', pcId);
+    
+    if (!ws || ws.readyState !== WebSocket.OPEN) {
+        alert('❌ Not connected to server.');
+        return;
+    }
 
-            if (!confirm(`⏹️ Stop session on ${pcId}?`)) return;
+    const pc = pcs[pcId];
+    if (!pc) {
+        alert('❌ PC not found');
+        return;
+    }
 
-            ws.send(JSON.stringify({
-                type: 'stop_session',
-                pcId: pcId
-            }));
+    if (pc.status !== 'running') {
+        alert('ℹ️ PC is not currently running a session.');
+        return;
+    }
 
-            addLog(pcId, '⏹️ Session Stopped', '-');
-        }
+    if (!confirm(`⏹️ Stop session on ${pcId}?\n\nThis will end the current session immediately.`)) return;
+
+    console.log('📤 Sending stop_session to server for:', pcId);
+    
+    ws.send(JSON.stringify({
+        type: 'stop_session',
+        pcId: pcId
+    }));
+
+    // Update local status immediately for better UX
+    pc.status = 'idle';
+    pc.timeRemaining = 0;
+    pc.isRunning = false;
+    renderPCs();
+    updateStats();
+    
+    addLog(pcId, '⏹️ Session Stopped (sent)', '-');
+}
 
 	function shutdownAll() {
 	    if (!ws || ws.readyState !== WebSocket.OPEN) {
