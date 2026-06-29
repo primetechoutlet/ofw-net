@@ -1,5 +1,5 @@
 // ============================================================
-// OFW-NET DATABASE MODULE - Using better-sqlite3
+// OFW-NET DATABASE MODULE - Using better-sqlite3 v11
 // ============================================================
 
 const Database = require('better-sqlite3');
@@ -13,7 +13,11 @@ if (!fs.existsSync(dataDir)) {
 }
 
 const dbPath = path.join(dataDir, 'pisonet.db');
-const db = new Database(dbPath);
+
+// Open database in read-write mode, create if it doesn't exist
+const db = new Database(dbPath, {
+    verbose: console.log
+});
 
 console.log('📦 Database initialized at:', dbPath);
 
@@ -21,7 +25,6 @@ console.log('📦 Database initialized at:', dbPath);
 // CREATE TABLES (Synchronous with better-sqlite3)
 // ============================================================
 
-// 1. Sessions table
 db.exec(`
     CREATE TABLE IF NOT EXISTS sessions (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -36,7 +39,6 @@ db.exec(`
     )
 `);
 
-// 2. Payments table
 db.exec(`
     CREATE TABLE IF NOT EXISTS payments (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -51,7 +53,6 @@ db.exec(`
     )
 `);
 
-// 3. Logs table
 db.exec(`
     CREATE TABLE IF NOT EXISTS logs (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -62,7 +63,6 @@ db.exec(`
     )
 `);
 
-// 4. PC status table
 db.exec(`
     CREATE TABLE IF NOT EXISTS pc_status (
         pcId TEXT PRIMARY KEY,
@@ -115,25 +115,8 @@ const upsertPCStatus = db.prepare(`
     sessionAmount = excluded.sessionAmount
 `);
 
-const getSessionHistory = db.prepare(`
-    SELECT * FROM sessions WHERE pcId = ? ORDER BY startTime DESC LIMIT ?
-`);
-
-const getLogs = db.prepare(`
-    SELECT * FROM logs ORDER BY timestamp DESC LIMIT ?
-`);
-
-const getDailySales = db.prepare(`
-    SELECT 
-        COUNT(*) as totalSessions,
-        SUM(amount) as totalAmount,
-        SUM(minutes) as totalMinutes
-    FROM sessions 
-    WHERE DATE(startTime) = ? AND status = 'ended'
-`);
-
 // ============================================================
-// WRAPPER FUNCTIONS (Async-friendly)
+// HELPER FUNCTIONS (Async-friendly)
 // ============================================================
 
 function logAction(pcId, action, details = '') {
@@ -198,37 +181,6 @@ function updatePCStatus(pcId, status, timeRemaining = 0, sessionMinutes = 0, ses
     }
 }
 
-function getSessionHistory(pcId, limit = 50) {
-    try {
-        const rows = getSessionHistory.all(pcId, limit);
-        return Promise.resolve(rows);
-    } catch (err) {
-        console.error('❌ Error getting history:', err);
-        return Promise.reject(err);
-    }
-}
-
-function getLogs(limit = 100) {
-    try {
-        const rows = getLogs.all(limit);
-        return Promise.resolve(rows);
-    } catch (err) {
-        console.error('❌ Error getting logs:', err);
-        return Promise.reject(err);
-    }
-}
-
-function getDailySales(date = null) {
-    try {
-        const dateFilter = date || new Date().toISOString().split('T')[0];
-        const row = getDailySales.get(dateFilter);
-        return Promise.resolve(row || { totalSessions: 0, totalAmount: 0, totalMinutes: 0 });
-    } catch (err) {
-        console.error('❌ Error getting daily sales:', err);
-        return Promise.reject(err);
-    }
-}
-
 // ============================================================
 // EXPORT MODULE
 // ============================================================
@@ -239,10 +191,7 @@ module.exports = {
     updateSessionEnd,
     savePayment,
     confirmPayment,
-    getSessionHistory,
-    getLogs,
-    updatePCStatus,
-    getDailySales
+    updatePCStatus
 };
 
 console.log('🗄️ Database module loaded successfully');
