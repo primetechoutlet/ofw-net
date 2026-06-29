@@ -1,9 +1,8 @@
 // ============================================================
-// OFW-NET DATABASE MODULE
-// Handles all database operations using SQLite
+// OFW-NET DATABASE MODULE - Using better-sqlite3
 // ============================================================
 
-const sqlite3 = require('sqlite3').verbose();
+const Database = require('better-sqlite3');
 const path = require('path');
 const fs = require('fs');
 
@@ -14,265 +13,220 @@ if (!fs.existsSync(dataDir)) {
 }
 
 const dbPath = path.join(dataDir, 'pisonet.db');
-const db = new sqlite3.Database(dbPath);
+const db = new Database(dbPath);
 
 console.log('📦 Database initialized at:', dbPath);
 
 // ============================================================
-// CREATE TABLES
-// ============================================================
-db.serialize(() => {
-    // 1. Sessions table - tracks all PC sessions
-    db.run(`
-        CREATE TABLE IF NOT EXISTS sessions (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            pcId TEXT NOT NULL,
-            minutes INTEGER NOT NULL,
-            amount REAL NOT NULL,
-            startTime DATETIME DEFAULT CURRENT_TIMESTAMP,
-            endTime DATETIME,
-            status TEXT DEFAULT 'active',
-            reference TEXT UNIQUE,
-            staffConfirmed TEXT
-        )
-    `);
-
-    // 2. Payments table - tracks all payment requests
-    db.run(`
-        CREATE TABLE IF NOT EXISTS payments (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            pcId TEXT NOT NULL,
-            amount REAL NOT NULL,
-            minutes INTEGER NOT NULL,
-            status TEXT DEFAULT 'pending',
-            reference TEXT UNIQUE,
-            createdAt DATETIME DEFAULT CURRENT_TIMESTAMP,
-            confirmedAt DATETIME,
-            confirmedBy TEXT
-        )
-    `);
-
-    // 3. Logs table - tracks all system activities
-    db.run(`
-        CREATE TABLE IF NOT EXISTS logs (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            pcId TEXT NOT NULL,
-            action TEXT NOT NULL,
-            details TEXT,
-            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
-        )
-    `);
-
-    // 4. PC status table - tracks last known status of each PC
-    db.run(`
-        CREATE TABLE IF NOT EXISTS pc_status (
-            pcId TEXT PRIMARY KEY,
-            status TEXT DEFAULT 'idle',
-            timeRemaining INTEGER DEFAULT 0,
-            lastSeen DATETIME DEFAULT CURRENT_TIMESTAMP,
-            sessionMinutes INTEGER DEFAULT 0,
-            sessionAmount REAL DEFAULT 0
-        )
-    `);
-
-    console.log('✅ Database tables created/verified');
-});
-
-// ============================================================
-// HELPER FUNCTIONS
+// CREATE TABLES (Synchronous with better-sqlite3)
 // ============================================================
 
-/**
- * Log an action to the database
- */
+// 1. Sessions table
+db.exec(`
+    CREATE TABLE IF NOT EXISTS sessions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        pcId TEXT NOT NULL,
+        minutes INTEGER NOT NULL,
+        amount REAL NOT NULL,
+        startTime DATETIME DEFAULT CURRENT_TIMESTAMP,
+        endTime DATETIME,
+        status TEXT DEFAULT 'active',
+        reference TEXT UNIQUE,
+        staffConfirmed TEXT
+    )
+`);
+
+// 2. Payments table
+db.exec(`
+    CREATE TABLE IF NOT EXISTS payments (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        pcId TEXT NOT NULL,
+        amount REAL NOT NULL,
+        minutes INTEGER NOT NULL,
+        status TEXT DEFAULT 'pending',
+        reference TEXT UNIQUE,
+        createdAt DATETIME DEFAULT CURRENT_TIMESTAMP,
+        confirmedAt DATETIME,
+        confirmedBy TEXT
+    )
+`);
+
+// 3. Logs table
+db.exec(`
+    CREATE TABLE IF NOT EXISTS logs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        pcId TEXT NOT NULL,
+        action TEXT NOT NULL,
+        details TEXT,
+        timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+    )
+`);
+
+// 4. PC status table
+db.exec(`
+    CREATE TABLE IF NOT EXISTS pc_status (
+        pcId TEXT PRIMARY KEY,
+        status TEXT DEFAULT 'idle',
+        timeRemaining INTEGER DEFAULT 0,
+        lastSeen DATETIME DEFAULT CURRENT_TIMESTAMP,
+        sessionMinutes INTEGER DEFAULT 0,
+        sessionAmount REAL DEFAULT 0
+    )
+`);
+
+console.log('✅ Database tables created/verified');
+
+// ============================================================
+// PREPARED STATEMENTS (Faster queries)
+// ============================================================
+
+const insertLog = db.prepare(`
+    INSERT INTO logs (pcId, action, details) VALUES (?, ?, ?)
+`);
+
+const insertSession = db.prepare(`
+    INSERT INTO sessions (pcId, minutes, amount, reference, staffConfirmed) 
+    VALUES (?, ?, ?, ?, ?)
+`);
+
+const updateSessionEnd = db.prepare(`
+    UPDATE sessions SET endTime = CURRENT_TIMESTAMP, status = ? 
+    WHERE pcId = ? AND status = 'active'
+`);
+
+const insertPayment = db.prepare(`
+    INSERT INTO payments (pcId, amount, minutes, reference) 
+    VALUES (?, ?, ?, ?)
+`);
+
+const updatePayment = db.prepare(`
+    UPDATE payments SET status = 'confirmed', confirmedAt = CURRENT_TIMESTAMP, confirmedBy = ? 
+    WHERE reference = ?
+`);
+
+const upsertPCStatus = db.prepare(`
+    INSERT INTO pc_status (pcId, status, timeRemaining, lastSeen, sessionMinutes, sessionAmount) 
+    VALUES (?, ?, ?, CURRENT_TIMESTAMP, ?, ?)
+    ON CONFLICT(pcId) DO UPDATE SET 
+    status = excluded.status, 
+    timeRemaining = excluded.timeRemaining, 
+    lastSeen = CURRENT_TIMESTAMP,
+    sessionMinutes = excluded.sessionMinutes,
+    sessionAmount = excluded.sessionAmount
+`);
+
+const getSessionHistory = db.prepare(`
+    SELECT * FROM sessions WHERE pcId = ? ORDER BY startTime DESC LIMIT ?
+`);
+
+const getLogs = db.prepare(`
+    SELECT * FROM logs ORDER BY timestamp DESC LIMIT ?
+`);
+
+const getDailySales = db.prepare(`
+    SELECT 
+        COUNT(*) as totalSessions,
+        SUM(amount) as totalAmount,
+        SUM(minutes) as totalMinutes
+    FROM sessions 
+    WHERE DATE(startTime) = ? AND status = 'ended'
+`);
+
+// ============================================================
+// WRAPPER FUNCTIONS (Async-friendly)
+// ============================================================
+
 function logAction(pcId, action, details = '') {
-    return new Promise((resolve, reject) => {
-        db.run(
-            'INSERT INTO logs (pcId, action, details) VALUES (?, ?, ?)',
-            [pcId, action, details],
-            function(err) {
-                if (err) {
-                    console.error('❌ Error logging action:', err);
-                    reject(err);
-                } else {
-                    resolve(this.lastID);
-                }
-            }
-        );
-    });
+    try {
+        const result = insertLog.run(pcId, action, details);
+        return Promise.resolve(result.lastInsertRowid);
+    } catch (err) {
+        console.error('❌ Error logging action:', err);
+        return Promise.reject(err);
+    }
 }
 
-/**
- * Save a new session
- */
 function saveSession(pcId, minutes, amount, staffId = 'staff') {
-    return new Promise((resolve, reject) => {
+    try {
         const reference = `SESS-${Date.now()}-${pcId}`;
-        db.run(
-            'INSERT INTO sessions (pcId, minutes, amount, reference, staffConfirmed) VALUES (?, ?, ?, ?, ?)',
-            [pcId, minutes, amount, reference, staffId],
-            function(err) {
-                if (err) {
-                    console.error('❌ Error saving session:', err);
-                    reject(err);
-                } else {
-                    resolve({ id: this.lastID, reference });
-                }
-            }
-        );
-    });
+        const result = insertSession.run(pcId, minutes, amount, reference, staffId);
+        return Promise.resolve({ id: result.lastInsertRowid, reference });
+    } catch (err) {
+        console.error('❌ Error saving session:', err);
+        return Promise.reject(err);
+    }
 }
 
-/**
- * Update session end time
- */
 function updateSessionEnd(pcId, status = 'ended') {
-    return new Promise((resolve, reject) => {
-        db.run(
-            'UPDATE sessions SET endTime = CURRENT_TIMESTAMP, status = ? WHERE pcId = ? AND status = "active"',
-            [status, pcId],
-            function(err) {
-                if (err) {
-                    console.error('❌ Error updating session:', err);
-                    reject(err);
-                } else {
-                    resolve(this.changes);
-                }
-            }
-        );
-    });
+    try {
+        const result = updateSessionEnd.run(status, pcId);
+        return Promise.resolve(result.changes);
+    } catch (err) {
+        console.error('❌ Error updating session:', err);
+        return Promise.reject(err);
+    }
 }
 
-/**
- * Save a payment request
- */
 function savePayment(pcId, amount, minutes) {
-    return new Promise((resolve, reject) => {
+    try {
         const reference = `PAY-${Date.now()}-${pcId}`;
-        db.run(
-            'INSERT INTO payments (pcId, amount, minutes, reference) VALUES (?, ?, ?, ?)',
-            [pcId, amount, minutes, reference],
-            function(err) {
-                if (err) {
-                    console.error('❌ Error saving payment:', err);
-                    reject(err);
-                } else {
-                    resolve({ id: this.lastID, reference });
-                }
-            }
-        );
-    });
+        const result = insertPayment.run(pcId, amount, minutes, reference);
+        return Promise.resolve({ id: result.lastInsertRowid, reference });
+    } catch (err) {
+        console.error('❌ Error saving payment:', err);
+        return Promise.reject(err);
+    }
 }
 
-/**
- * Confirm a payment
- */
 function confirmPayment(reference, confirmedBy = 'staff') {
-    return new Promise((resolve, reject) => {
-        db.run(
-            'UPDATE payments SET status = "confirmed", confirmedAt = CURRENT_TIMESTAMP, confirmedBy = ? WHERE reference = ?',
-            [confirmedBy, reference],
-            function(err) {
-                if (err) {
-                    console.error('❌ Error confirming payment:', err);
-                    reject(err);
-                } else {
-                    resolve(this.changes);
-                }
-            }
-        );
-    });
+    try {
+        const result = updatePayment.run(confirmedBy, reference);
+        return Promise.resolve(result.changes);
+    } catch (err) {
+        console.error('❌ Error confirming payment:', err);
+        return Promise.reject(err);
+    }
 }
 
-/**
- * Get session history for a PC
- */
-function getSessionHistory(pcId, limit = 50) {
-    return new Promise((resolve, reject) => {
-        db.all(
-            'SELECT * FROM sessions WHERE pcId = ? ORDER BY startTime DESC LIMIT ?',
-            [pcId, limit],
-            (err, rows) => {
-                if (err) {
-                    console.error('❌ Error getting history:', err);
-                    reject(err);
-                } else {
-                    resolve(rows);
-                }
-            }
-        );
-    });
-}
-
-/**
- * Get all logs
- */
-function getLogs(limit = 100) {
-    return new Promise((resolve, reject) => {
-        db.all(
-            'SELECT * FROM logs ORDER BY timestamp DESC LIMIT ?',
-            [limit],
-            (err, rows) => {
-                if (err) {
-                    console.error('❌ Error getting logs:', err);
-                    reject(err);
-                } else {
-                    resolve(rows);
-                }
-            }
-        );
-    });
-}
-
-/**
- * Update PC status
- */
 function updatePCStatus(pcId, status, timeRemaining = 0, sessionMinutes = 0, sessionAmount = 0) {
-    return new Promise((resolve, reject) => {
-        db.run(
-            `INSERT INTO pc_status (pcId, status, timeRemaining, lastSeen, sessionMinutes, sessionAmount) 
-             VALUES (?, ?, ?, CURRENT_TIMESTAMP, ?, ?)
-             ON CONFLICT(pcId) DO UPDATE SET 
-             status = ?, timeRemaining = ?, lastSeen = CURRENT_TIMESTAMP, 
-             sessionMinutes = ?, sessionAmount = ?`,
-            [pcId, status, timeRemaining, sessionMinutes, sessionAmount, 
-             status, timeRemaining, sessionMinutes, sessionAmount],
-            function(err) {
-                if (err) {
-                    console.error('❌ Error updating PC status:', err);
-                    reject(err);
-                } else {
-                    resolve(this.changes);
-                }
-            }
-        );
-    });
+    try {
+        const result = upsertPCStatus.run(pcId, status, timeRemaining, sessionMinutes, sessionAmount);
+        return Promise.resolve(result.changes);
+    } catch (err) {
+        console.error('❌ Error updating PC status:', err);
+        return Promise.reject(err);
+    }
 }
 
-/**
- * Get daily sales summary
- */
+function getSessionHistory(pcId, limit = 50) {
+    try {
+        const rows = getSessionHistory.all(pcId, limit);
+        return Promise.resolve(rows);
+    } catch (err) {
+        console.error('❌ Error getting history:', err);
+        return Promise.reject(err);
+    }
+}
+
+function getLogs(limit = 100) {
+    try {
+        const rows = getLogs.all(limit);
+        return Promise.resolve(rows);
+    } catch (err) {
+        console.error('❌ Error getting logs:', err);
+        return Promise.reject(err);
+    }
+}
+
 function getDailySales(date = null) {
-    return new Promise((resolve, reject) => {
+    try {
         const dateFilter = date || new Date().toISOString().split('T')[0];
-        db.get(
-            `SELECT 
-                COUNT(*) as totalSessions,
-                SUM(amount) as totalAmount,
-                SUM(minutes) as totalMinutes
-             FROM sessions 
-             WHERE DATE(startTime) = ? AND status = 'ended'`,
-            [dateFilter],
-            (err, row) => {
-                if (err) {
-                    console.error('❌ Error getting daily sales:', err);
-                    reject(err);
-                } else {
-                    resolve(row || { totalSessions: 0, totalAmount: 0, totalMinutes: 0 });
-                }
-            }
-        );
-    });
+        const row = getDailySales.get(dateFilter);
+        return Promise.resolve(row || { totalSessions: 0, totalAmount: 0, totalMinutes: 0 });
+    } catch (err) {
+        console.error('❌ Error getting daily sales:', err);
+        return Promise.reject(err);
+    }
 }
 
 // ============================================================
